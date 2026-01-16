@@ -1,8 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
-import 'dart:io';
+import '../services/face_recognition_service.dart';
 
 class CameraLockScreen extends StatefulWidget {
   const CameraLockScreen({super.key});
@@ -14,6 +13,8 @@ class CameraLockScreen extends StatefulWidget {
 class _CameraLockScreenState extends State<CameraLockScreen>
     with SingleTickerProviderStateMixin {
   CameraController? controller;
+  final FaceRecognitionService _faceRecognitionService =
+      FaceRecognitionService();
   bool _isVerifying = false;
   String _statusMessage = 'Position your face in the frame';
   bool _permissionDenied = false;
@@ -24,6 +25,7 @@ class _CameraLockScreenState extends State<CameraLockScreen>
   void initState() {
     super.initState();
     _requestCameraPermission();
+    _initializeFaceRecognition();
 
     // Setup pulse animation for the face detection frame
     _pulseController = AnimationController(
@@ -34,6 +36,14 @@ class _CameraLockScreenState extends State<CameraLockScreen>
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+  }
+
+  Future<void> _initializeFaceRecognition() async {
+    try {
+      await _faceRecognitionService.initialize();
+    } catch (e) {
+      debugPrint('Error initializing face recognition: $e');
+    }
   }
 
   Future<void> _requestCameraPermission() async {
@@ -103,6 +113,7 @@ class _CameraLockScreenState extends State<CameraLockScreen>
   void dispose() {
     _pulseController.dispose();
     controller?.dispose();
+    _faceRecognitionService.dispose();
     super.dispose();
   }
 
@@ -121,50 +132,125 @@ class _CameraLockScreenState extends State<CameraLockScreen>
       final XFile image = await controller!.takePicture();
 
       setState(() {
-        _statusMessage = 'Uploading to server...';
+        _statusMessage = 'Analyzing face...';
       });
 
-      // Upload image to S3
-      final File imageFile = File(image.path);
-      final imageBytes = await imageFile.readAsBytes();
-
-      // Generate unique filename with timestamp
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final filename = 'face_$timestamp.png';
-
-      // Construct S3 URL (matching reference implementation)
-      final url = Uri.parse(
-        'https://jay-streaming.s3.ap-south-1.amazonaws.com/$filename',
+      // Verify the face
+      final result = await _faceRecognitionService.verifyUser(
+        image,
+        threshold: 0.7,
       );
 
-      debugPrint('Uploading to URL: $url');
-      debugPrint('File size: ${imageBytes.length} bytes');
-
-      final response = await http.put(
-        url,
-        body: imageBytes,
-        headers: {'Content-Type': 'image/png'},
-      );
-
-      debugPrint('Response status: ${response.statusCode}');
-      debugPrint('Response body: ${response.body}');
-
-      if (response.statusCode == 200) {
-        setState(() {
-          _statusMessage = 'Upload successful!';
-        });
-
-        // Show success for 2 seconds, then reset
-        await Future.delayed(const Duration(seconds: 2));
-
-        if (mounted) {
+      if (mounted) {
+        if (result.success) {
+          // Show success
           setState(() {
-            _isVerifying = false;
-            _statusMessage = 'Position your face in the frame';
+            _statusMessage = '✓ ${result.message}';
           });
+
+          // Show success dialog
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF1A1F3A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.check_circle, color: Color(0xFF00D9FF), size: 32),
+                  SizedBox(width: 12),
+                  Text('Access Granted', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Welcome, ${result.userName}!',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Match confidence: ${(result.similarity! * 100).toStringAsFixed(1)}%',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.7),
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text(
+                    'OK',
+                    style: TextStyle(color: Color(0xFF00D9FF)),
+                  ),
+                ),
+              ],
+            ),
+          );
+
+          // Reset after delay
+          await Future.delayed(const Duration(seconds: 2));
+          if (mounted) {
+            setState(() {
+              _isVerifying = false;
+              _statusMessage = 'Position your face in the frame';
+            });
+          }
+        } else {
+          // Show failure
+          setState(() {
+            _statusMessage = '✗ ${result.message}';
+          });
+
+          // Show failure dialog
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF1A1F3A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.cancel, color: Colors.redAccent, size: 32),
+                  SizedBox(width: 12),
+                  Text('Access Denied', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+              content: Text(
+                result.message,
+                style: const TextStyle(color: Colors.white70),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text(
+                    'Try Again',
+                    style: TextStyle(color: Color(0xFF00D9FF)),
+                  ),
+                ),
+              ],
+            ),
+          );
+
+          // Reset after delay
+          await Future.delayed(const Duration(seconds: 3));
+          if (mounted) {
+            setState(() {
+              _isVerifying = false;
+              _statusMessage = 'Position your face in the frame';
+            });
+          }
         }
-      } else {
-        throw Exception('Upload failed with status: ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Verification error: $e');

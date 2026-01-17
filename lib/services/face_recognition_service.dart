@@ -6,20 +6,24 @@ import 'package:image/image.dart' as img;
 import 'face_detection_service.dart';
 import 'face_embedding_service.dart';
 import 'face_storage_service.dart';
+import 'anti_spoofing_service.dart';
 
 class FaceRecognitionService {
   final FaceDetectionService _detectionService;
   final FaceEmbeddingService _embeddingService;
   final FaceStorageService _storageService;
+  final AntiSpoofingService _antiSpoofingService;
 
   FaceRecognitionService()
     : _detectionService = FaceDetectionService(),
       _embeddingService = FaceEmbeddingService(),
-      _storageService = FaceStorageService();
+      _storageService = FaceStorageService(),
+      _antiSpoofingService = AntiSpoofingService();
 
   /// Initialize the service (load TFLite model)
   Future<void> initialize() async {
     await _embeddingService.initialize();
+    await _antiSpoofingService.initialize();
   }
 
   /// Enroll a new user
@@ -74,8 +78,21 @@ class FaceRecognitionService {
         height: faceBoundingBox.height.toInt().clamp(0, image.height),
       );
 
-      // Generate embedding
+      // Anti-spoofing check: Verify liveness BEFORE enrollment
       final faceBytes = Uint8List.fromList(img.encodePng(croppedFace));
+      final livenessResult = await _antiSpoofingService.checkLiveness(
+        faceBytes,
+      );
+
+      if (!livenessResult.isReal) {
+        return EnrollmentResult(
+          success: false,
+          message:
+              'Spoofing detected! Please use a real face, not a photo or video. (Score: ${(livenessResult.score * 100).toStringAsFixed(1)}%)',
+        );
+      }
+
+      // Generate embedding
       final embedding = await _embeddingService.generateEmbedding(faceBytes);
 
       // Generate unique user ID
@@ -146,8 +163,21 @@ class FaceRecognitionService {
         height: faceBoundingBox.height.toInt().clamp(0, image.height),
       );
 
-      // Generate embedding
+      // Anti-spoofing check: Verify liveness BEFORE verification
       final faceBytes = Uint8List.fromList(img.encodePng(croppedFace));
+      final livenessResult = await _antiSpoofingService.checkLiveness(
+        faceBytes,
+      );
+
+      if (!livenessResult.isReal) {
+        return VerificationResult(
+          success: false,
+          message:
+              'Spoofing detected! Access denied. Please use a real face, not a photo or video.',
+        );
+      }
+
+      // Generate embedding
       final currentEmbedding = await _embeddingService.generateEmbedding(
         faceBytes,
       );
@@ -214,6 +244,7 @@ class FaceRecognitionService {
   void dispose() {
     _detectionService.dispose();
     _embeddingService.dispose();
+    _antiSpoofingService.dispose();
   }
 }
 
